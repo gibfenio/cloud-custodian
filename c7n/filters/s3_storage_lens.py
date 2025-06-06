@@ -39,7 +39,12 @@ class StorageLensMetricsFilter(Filter):
                     "buckets": bucket,
                     "csv_list": csv_list
                 })
-            result = {"metrics_info": metrics_info}
+            analyzer = StorageLensMetricsAnalyzer(metrics_info)
+            result = {
+                "metrics_info": metrics_info,
+                "all_csvs": analyzer.get_all_csvs(),
+                "summary": analyzer.summary()
+            }
             # self.log.info(f"Metrics info: {json.dumps(result, indent=2)}")
             print("=============")
             print(json.dumps(result, indent=2))
@@ -145,3 +150,25 @@ class StorageLensMetricsFilter(Filter):
                         if (now - last_modified).days < days:
                             result[bucket].append(key)
         return result
+
+class StorageLensMetricsAnalyzer:
+    def __init__(self, metrics_info):
+        self.metrics_info = metrics_info
+
+    def get_all_csvs(self):
+        """Return all CSV file paths across all configs/buckets."""
+        all_csvs = []
+        for entry in self.metrics_info:
+            all_csvs.extend(entry.get('csv_list', []))
+        return all_csvs
+
+    def summary(self):
+        """Return a summary of configs and CSV counts."""
+        return [
+            {
+                'config_name': entry['config_name'],
+                'bucket': entry['buckets'],
+                'csv_count': len(entry.get('csv_list', []))
+            }
+            for entry in self.metrics_info
+        ]
