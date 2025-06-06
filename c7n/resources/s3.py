@@ -65,7 +65,7 @@ from c7n.utils import (
     chunks, local_session, set_annotation, type_schema, filter_empty,
     dumps, format_string_values, get_account_alias_from_sts)
 from c7n.resources.aws import inspect_bucket_region
-
+from c7n.filters.s3_storage_lens import StorageLensMetricsFilter
 
 log = logging.getLogger('custodian.s3')
 
@@ -399,6 +399,7 @@ class S3(query.QueryResourceManager):
         perms.extend([n[-1] for n in S3_AUGMENT_TABLE])
         return perms
 
+S3.filter_registry.register('storage-lens-metrics', StorageLensMetricsFilter)
 
 S3_CONFIG_SUPPLEMENT_NULL_MAP = {
     'BucketLoggingConfiguration': u'{"destinationBucketName":null,"logFilePrefix":null}',
@@ -806,29 +807,7 @@ class BucketFilterBase(Filter):
         }
 
 
-@S3.action_registry.register("post-finding")
-class BucketFinding(PostFinding):
-
-    resource_type = 'AwsS3Bucket'
-
-    def format_resource(self, r):
-        owner = r.get("Acl", {}).get("Owner", {})
-        resource = {
-            "Type": self.resource_type,
-            "Id": "arn:aws:s3:::{}".format(r["Name"]),
-            "Region": get_region(r),
-            "Tags": {t["Key"]: t["Value"] for t in r.get("Tags", [])},
-            "Details": {self.resource_type: {
-                "OwnerId": owner.get('ID', 'Unknown')}}
-        }
-
-        if "DisplayName" in owner:
-            resource["Details"]["AwsS3Bucket"]["OwnerName"] = owner['DisplayName']
-
-        return filter_empty(resource)
-
-
-@S3.filter_registry.register('has-statement')
+@filters.register('has-statement')
 class S3HasStatementFilter(HasStatementFilter):
     def get_std_format_args(self, bucket):
         return {
@@ -839,7 +818,7 @@ class S3HasStatementFilter(HasStatementFilter):
         }
 
 
-@S3.filter_registry.register('lock-configuration')
+@filters.register('lock-configuration')
 class S3LockConfigurationFilter(ValueFilter):
     """
     Filter S3 buckets based on their object lock configurations
@@ -2299,7 +2278,6 @@ class EncryptExtantKeys(ScanBucket):
     def process_large_file(self, s3, bucket_name, key, info, params):
         """For objects over 5gb, use multipart upload to copy"""
         part_size = MAX_COPY_SIZE - (1024 ** 2)
-        num_parts = int(math.ceil(info['ContentLength'] / part_size))
         source = params.pop('CopySource')
 
         params.pop('MetadataDirective')
@@ -2326,7 +2304,7 @@ class EncryptExtantKeys(ScanBucket):
 
         try:
             with self.executor_factory(max_workers=2) as w:
-                parts = list(w.map(upload_part, range(1, num_parts + 1)))
+                parts = list(w.map(upload_part, range(1, int(info['ContentLength'] / part_size) + 2)))
         except Exception:
             log.warning(
                 "Error during large key copy bucket: %s key: %s, "
@@ -2942,17 +2920,8 @@ class ConfigureIntelligentTiering(BucketActionBase):
                                 - Key: Hello
                                   Value: World
                         - Tierings:
-                          - Days: 123
+                          - Days: 149
                             AccessTier: ARCHIVE_ACCESS
-                actions:
-                  - type: set-intelligent-tiering
-                    Id: c7n-default
-                    IntelligentTieringConfiguration:
-                      Id: c7n-default
-                      Status: Enabled
-                      Tierings:
-                        - Days: 149
-                          AccessTier: ARCHIVE_ACCESS
 
               - name: s3-delete-intelligent-tiering-configuration
                 resource: aws.s3
@@ -3035,7 +3004,8 @@ class ConfigureIntelligentTiering(BucketActionBase):
 
     def process_bucket(self, bucket):
         s3 = bucket_client(local_session(self.manager.session_factory), bucket)
-
+        if not self.data.get('Id') and not self.data.get('IntelligentTieringConfiguration'):
+            raise ValueError('Id and IntelligentTieringConfiguration are required')
         if 'list_bucket_intelligent_tiering_configurations' in bucket.get(
             'c7n:DeniedMethods', []):
             log.warning("Access Denied Bucket:%s while reading intelligent tiering configurations"
@@ -3679,11 +3649,18 @@ class SetBucketEncryption(KMSKeyResolverMixin, BucketActionBase):
             self.resolve_keys(buckets)
 
         with self.executor_factory(max_workers=3) as w:
-            futures = {w.submit(self.process_bucket, b): b for b in buckets}
+            futures = {}
+
+            for b in buckets:
+                futures[w.submit(self.process_bucket, b)] = b
+
             for future in as_completed(futures):
                 if future.exception():
-                    self.log.error('Message: %s Bucket: %s', future.exception(),
-                                   futures[future]['Name'])
+                    bucket = futures[future]
+                    self.log.error(
+                      'error modifying bucket encryption configuration: %s\n%s',
+                        bucket['Name'], future.exception())
+                    continue
 
     def process_bucket(self, bucket):
         default_key_desc = 'Default master key that protects my S3 objects when no other key is defined' # noqa
