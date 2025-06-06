@@ -1,4 +1,6 @@
 import csv
+import pandas as pd
+import io
 import json
 from datetime import datetime, timedelta, timezone
 import boto3
@@ -15,10 +17,13 @@ class StorageLensMetricsFilter(Filter):
     """
     schema = type_schema(
         'storage-lens-metrics',
-        metric={'type': 'string'},
         op={'type': 'string'},
+        metric={'type': 'string'},
         value={'type': 'number'},
         days={'type': 'integer'},
+        metrics={'type': 'array', 'items': {'type': 'string'}},
+        threshold={'type': 'number'},
+        statistic={'type': 'string'},
     )
 
     def process(self, resources, event=None):
@@ -30,6 +35,7 @@ class StorageLensMetricsFilter(Filter):
 
             configs_buckets = self.get_all_report_buckets_with_config(account_id, region)
             metrics_info = []
+            all_csvs = []
             for config_id, buckets in configs_buckets:
                 # Only one bucket per config
                 bucket = buckets[0] if buckets else None
@@ -39,18 +45,45 @@ class StorageLensMetricsFilter(Filter):
                     "buckets": bucket,
                     "csv_list": csv_list
                 })
+                all_csvs.extend([f's3://{bucket}/{key}' for key in csv_list])
             analyzer = StorageLensMetricsAnalyzer(metrics_info)
             result = {
                 "metrics_info": metrics_info,
                 "all_csvs": analyzer.get_all_csvs(),
                 "summary": analyzer.summary()
             }
-            # self.log.info(f"Metrics info: {json.dumps(result, indent=2)}")
-            print("=============")
-            print(json.dumps(result, indent=2))
+            print("All Storage Lens CSVs:")
+            for csv_path in all_csvs:
+                print(csv_path)
+
+            csv_tuples = [(path.split('/')[2], '/'.join(path.split('/')[3:])) for path in all_csvs]
+            metrics_df = self.to_df_from_csv(session, csv_tuples, region)
+
         except Exception as e:
             self.log.error(f"Error in getting Storage Lens report files: {e}")
         return resources
+
+    def to_df_from_csv(self, session, csv_tuples, region):
+        all_dfs = []
+        print("\nReading CSV contents into DataFrame:")
+        for bucket, key in csv_tuples:
+            s3_path = f's3://{bucket}/{key}'
+            print(f'--- Reading {s3_path} ---')
+            try:
+                obj = session.client('s3', region_name=region).get_object(Bucket=bucket, Key=key)
+                content = obj['Body'].read().decode('utf-8')
+                df = pd.read_csv(io.StringIO(content))
+                df['source_file'] = s3_path  # Add source column
+                all_dfs.append(df)
+            except Exception as e:
+                print(f'Error reading {s3_path}: {e}')
+
+        if all_dfs:
+            combined_df = pd.concat(all_dfs, ignore_index=True)
+        else:
+            combined_df = pd.DataFrame()  # Return empty if no files
+
+        return combined_df
 
     @staticmethod
     def get_all_report_buckets_with_config(account_id, region_name=None):
