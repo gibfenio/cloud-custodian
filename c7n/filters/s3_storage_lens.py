@@ -1,3 +1,5 @@
+import csv
+from datetime import datetime, timedelta, timezone
 import boto3
 import re
 import botocore
@@ -16,8 +18,6 @@ class StorageLensMetricsFilter(Filter):
         op={'type': 'string'},
         value={'type': 'number'},
         days={'type': 'integer'},
-        bucket={'type': 'string'},   # optional: S3 bucket for Storage Lens reports
-        prefix={'type': 'string'},   # optional: S3 prefix for reports
     )
 
     def process(self, resources, event=None):
@@ -26,10 +26,16 @@ class StorageLensMetricsFilter(Filter):
             account_id = session.client('sts').get_caller_identity()['Account']
             region = session.region_name
             report_buckets = self.get_all_report_buckets(account_id, region)
-            self.log.info(f"Discovered Storage Lens report buckets: {report_buckets}")
-            print(report_buckets)
+            # self.log.info(f"Discovered Storage Lens report buckets: {report_buckets}")
+
+            days = self.data.get('days', 1)
+
+            report_files = self.list_recent_report_files(session, report_buckets, days)
+            self.log.info(f"Recent report files: {report_files}")
+            print(f"Recent report files: {report_files}")
+
         except Exception as e:
-            self.log.error(f"Error in getting Storage Lens report buckets: {e}")
+            self.log.error(f"Error in getting Storage Lens report buckets or reading metrics: {e}")
 
         return resources
 
@@ -77,3 +83,24 @@ class StorageLensMetricsFilter(Filter):
         except Exception as e:
             print(f"Unexpected error in get_all_report_buckets: {e}")
             return []
+
+    @staticmethod
+    def list_recent_report_files(session, buckets, days):
+        """
+        List all Storage Lens CSV report files in the specified buckets created in the last N days.
+        Returns: {bucket_name: [list of s3 keys]}
+        """
+        result = {}
+        s3 = session.client('s3')
+        now = datetime.now(timezone.utc)
+        for bucket in buckets:
+            result[bucket] = []
+            paginator = s3.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=bucket):
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    if key.endswith('.csv'):
+                        last_modified = obj['LastModified']
+                        if (now - last_modified).days < days:
+                            result[bucket].append(key)
+        return result
