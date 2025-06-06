@@ -58,7 +58,8 @@ class StorageLensMetricsFilter(Filter):
 
             csv_tuples = [(path.split('/')[2], '/'.join(path.split('/')[3:])) for path in all_csvs]
             metrics_df = self.to_df_from_csv(session, csv_tuples, region)
-
+            return self.filter_buckets_by_metrics(metrics_df, resources)
+        
         except Exception as e:
             self.log.error(f"Error in getting Storage Lens report files: {e}")
         return resources
@@ -183,6 +184,89 @@ class StorageLensMetricsFilter(Filter):
                         if (now - last_modified).days < days:
                             result[bucket].append(key)
         return result
+
+    def detect_sum_exceeds_threshold(self, metrics_df, metrics, threshold):
+        """
+        For each metric in metrics, computes the sum of metric_value grouped by metric_name.
+        If the sum is >= threshold, returns a list of dicts with metric_name, sum, and csv sources.
+        """
+        print(">>>>>>>>>>>>>>>>>>>>>>>>>")
+        print(metrics)
+        print(">>>>>>>>>>>>>>>>>>>>>>>>>")
+        
+        result = []
+        for metric in metrics:
+            df_metric = metrics_df[metrics_df['metric_name'] == metric]
+            if df_metric.empty:
+                continue
+            total = df_metric['metric_value'].sum()
+            if total >= threshold:
+                sources = df_metric['source_file'].unique().tolist()
+                result.append({
+                    'metric_name': metric,
+                    'sum': int(total),  # Cast to native Python int for JSON serialization
+                    'csv_sources': sources
+                })
+        return result
+
+    def filter_buckets_by_metrics(self, metrics_df, resources):
+        """
+        Filters resources based on aggregated metrics from metrics_df and filter config.
+        Attaches all relevant metrics data as 'metrics_df' to each matching resource.
+        """
+        # DEBUG: print columns
+        print("[DEBUG] metrics_df columns:", metrics_df.columns.tolist())
+        if not metrics_df.empty:
+            print("==== metrics_df (first 2 rows, full columns) ====")
+            print(metrics_df.head(2).to_string(max_cols=None, line_width=1000))
+            print("=================================================")
+        if metrics_df.empty:
+            return []
+
+        # Use correct bucket column name
+        bucket_col = 'bucket_name' if 'bucket_name' in metrics_df.columns else 'Bucket'
+        print(f"[DEBUG] Using bucket column: {bucket_col}")
+
+        metrics = self.data.get('metrics', [])
+        statistic = self.data.get('statistic', 'sum')
+        op = self.data.get('op', 'ge')
+        threshold = self.data.get('threshold', 0)
+
+        # Only keep relevant metrics columns
+        filtered = metrics_df[metrics_df.columns.intersection([bucket_col] + metrics)]
+        grouped = filtered.groupby(bucket_col).agg(statistic)
+
+        import operator as opmap
+        ops = {
+            'ge': opmap.ge,
+            'gt': opmap.gt,
+            'le': opmap.le,
+            'lt': opmap.lt,
+            'eq': opmap.eq,
+            'ne': opmap.ne,
+        }
+        if statistic == 'sum' and op == 'ge':
+            result = self.detect_sum_exceeds_threshold(metrics_df, metrics, threshold)
+            print("=== Metrics sum >= threshold results ===")
+            for entry in result:
+                print(entry)
+            print("========================================")
+
+            # Attach results to resources by bucket name
+            matched = []
+            for r in resources:
+                bucket_name = r.get('Name') or r.get('Bucket') or r.get('name')
+                # Check if this bucket appears in any csv_sources for any metric
+                bucket_metrics = [
+                    entry for entry in result
+                    if any(bucket_name in src for src in entry['csv_sources'])
+                ]
+                if bucket_metrics:
+                    r['storage_lens_metrics'] = bucket_metrics
+                    matched.append(r)
+            return matched
+        
+        return []
 
 class StorageLensMetricsAnalyzer:
     def __init__(self, metrics_info):
