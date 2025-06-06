@@ -202,10 +202,15 @@ class StorageLensMetricsFilter(Filter):
             total = df_metric['metric_value'].sum()
             if total >= threshold:
                 sources = df_metric['source_file'].unique().tolist()
+                csv_metric_values = {
+                    src: int(df_metric[df_metric['source_file'] == src]['metric_value'].sum())
+                    for src in sources
+                }
                 result.append({
                     'metric_name': metric,
-                    'sum': int(total),  # Cast to native Python int for JSON serialization
-                    'csv_sources': sources
+                    'sum': int(total),
+                    'csv_sources': sources,
+                    'csv_metric_values': csv_metric_values
                 })
         return result
 
