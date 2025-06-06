@@ -201,15 +201,13 @@ class StorageLensMetricsFilter(Filter):
                 continue
             total = df_metric['metric_value'].sum()
             if total >= threshold:
-                sources = df_metric['source_file'].unique().tolist()
                 csv_metric_values = {
-                    src: int(df_metric[df_metric['source_file'] == src]['metric_value'].sum())
-                    for src in sources
+                    src: int(val)
+                    for src, val in df_metric.groupby('source_file')['metric_value'].sum().items()
                 }
                 result.append({
                     'metric_name': metric,
                     'sum': int(total),
-                    'csv_sources': sources,
                     'csv_metric_values': csv_metric_values
                 })
         return result
@@ -264,7 +262,7 @@ class StorageLensMetricsFilter(Filter):
                 # Check if this bucket appears in any csv_sources for any metric
                 bucket_metrics = [
                     entry for entry in result
-                    if any(bucket_name in src for src in entry['csv_sources'])
+                    if any(bucket_name in src for src in entry['csv_metric_values'].keys())
                 ]
                 if bucket_metrics:
                     r['storage_lens_metrics'] = bucket_metrics
