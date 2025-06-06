@@ -1,4 +1,5 @@
 import csv
+import json
 from datetime import datetime, timedelta, timezone
 import boto3
 import re
@@ -25,19 +26,59 @@ class StorageLensMetricsFilter(Filter):
             session = self.manager.session_factory()
             account_id = session.client('sts').get_caller_identity()['Account']
             region = session.region_name
-            report_buckets = self.get_all_report_buckets(account_id, region)
-            # self.log.info(f"Discovered Storage Lens report buckets: {report_buckets}")
-
             days = self.data.get('days', 1)
 
-            report_files = self.list_recent_report_files(session, report_buckets, days)
-            self.log.info(f"Recent report files: {report_files}")
-            print(f"Recent report files: {report_files}")
-
+            configs_buckets = self.get_all_report_buckets_with_config(account_id, region)
+            metrics_info = []
+            for config_id, buckets in configs_buckets:
+                # Only one bucket per config
+                bucket = buckets[0] if buckets else None
+                csv_list = self.list_recent_report_files(session, [bucket], days).get(bucket, []) if bucket else []
+                metrics_info.append({
+                    "config_name": config_id,
+                    "buckets": bucket,
+                    "csv_list": csv_list
+                })
+            result = {"metrics_info": metrics_info}
+            # self.log.info(f"Metrics info: {json.dumps(result, indent=2)}")
+            print("=============")
+            print(json.dumps(result, indent=2))
         except Exception as e:
-            self.log.error(f"Error in getting Storage Lens report buckets or reading metrics: {e}")
-
+            self.log.error(f"Error in getting Storage Lens report files: {e}")
         return resources
+
+    @staticmethod
+    def get_all_report_buckets_with_config(account_id, region_name=None):
+        """
+        Returns a list of tuples: (config_id, [bucket_names])
+        """
+        try:
+            s3control = boto3.client('s3control', region_name=region_name)
+            configs = []
+            resp = s3control.list_storage_lens_configurations(AccountId=account_id)
+            for sl_config in resp.get('StorageLensConfigurationList', []):
+                config_id = sl_config['Id']
+                try:
+                    config = s3control.get_storage_lens_configuration(
+                        ConfigId=config_id,
+                        AccountId=account_id
+                    )
+                except botocore.exceptions.ClientError as e:
+                    print(f"Error getting Storage Lens configuration {config_id}: {e}")
+                    continue
+                dest = (config.get('StorageLensConfiguration', {})
+                        .get('DataExport', {})
+                        .get('S3BucketDestination', {}))
+                bucket_arn = dest.get('Arn')
+                if bucket_arn:
+                    match = re.match(r"arn:aws:s3:::([a-zA-Z0-9._-]+)", bucket_arn)
+                    if match:
+                        bucket_name = match.group(1)
+                        configs.append((config_id, [bucket_name]))
+            return configs
+        except Exception as e:
+            print(f"Unexpected error in get_all_report_buckets_with_config: {e}")
+            return []
 
     @staticmethod
     def get_all_report_buckets(account_id, region_name=None):
