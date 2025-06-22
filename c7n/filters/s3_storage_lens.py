@@ -37,7 +37,6 @@ class StorageLensMetricsFilter(Filter):
             metrics_info = []
             all_csvs = []
             for config_id, buckets in configs_buckets:
-                # Only one bucket per config
                 bucket = buckets[0] if buckets else None
                 csv_list = self.list_recent_report_files(session, [bucket], days).get(bucket, []) if bucket else []
                 metrics_info.append({
@@ -57,9 +56,8 @@ class StorageLensMetricsFilter(Filter):
                 print(csv_path)
 
             csv_tuples = [(path.split('/')[2], '/'.join(path.split('/')[3:])) for path in all_csvs]
-            metrics_df = self.to_df_from_csv(session, csv_tuples, region)
-            return self.filter_buckets_by_metrics(metrics_df, resources)
-        
+            # Instead of combining, check each CSV individually
+            return self.filter_buckets_by_metrics_per_csv(session, csv_tuples, region, resources)
         except Exception as e:
             self.log.error(f"Error in getting Storage Lens report files: {e}")
         return resources
@@ -270,6 +268,61 @@ class StorageLensMetricsFilter(Filter):
             return matched
         
         return []
+
+    def filter_buckets_by_metrics_per_csv(self, session, csv_tuples, region, resources):
+        """
+        For each CSV, check all metrics in the 'metrics' list.
+        If any metric in the list meets the threshold in a CSV, that bucket is matched.
+        """
+        import pandas as pd
+        metrics = self.data.get('metrics', [])
+        threshold = self.data.get('threshold')
+        op = self.data.get('op', 'greater-than')
+        operator_map = {
+            'greater-than': lambda x, y: x > y,
+            'gt': lambda x, y: x > y,
+            'greater-than-equal': lambda x, y: x >= y,
+            'ge': lambda x, y: x >= y,
+            'less-than': lambda x, y: x < y,
+            'lt': lambda x, y: x < y,
+            'less-than-equal': lambda x, y: x <= y,
+            'le': lambda x, y: x <= y,
+            'equal': lambda x, y: x == y,
+            'eq': lambda x, y: x == y
+        }
+        operator = operator_map[op]
+        matched_buckets = set()
+        for bucket, key in csv_tuples:
+            s3_path = f's3://{bucket}/{key}'
+            try:
+                obj = session.client('s3', region_name=region).get_object(Bucket=bucket, Key=key)
+                content = obj['Body'].read().decode('utf-8')
+                df = pd.read_csv(io.StringIO(content))
+                # print(f'==== {s3_path} ====')
+                # print(df)
+                # print('--- Metric Sums (per metric_name) ---')
+                if 'metric_name' in df.columns and 'metric_value' in df.columns:
+                    df['metric_value'] = pd.to_numeric(df['metric_value'], errors='coerce').fillna(0)
+                    sums = df.groupby('metric_name')['metric_value'].sum()
+                    for metric, total in sums.items():
+                        # print(f'Metric: {metric} | Sum: {total}')
+                        if metric in metrics and operator(total, threshold):
+                            print(f'[DEBUG] Matched: bucket={bucket}, metric={metric}, sum={total}, threshold={threshold}, op={op}')
+                            matched_buckets.add(bucket)
+                            print(f'[DEBUG] matched_buckets so far: {matched_buckets}')
+                else:
+                    print('CSV missing required columns.')
+                print('==============================')
+            except Exception as e:
+                print(f'Error reading {s3_path}: {e}')
+        matched = []
+        for r in resources:
+            bucket_name = r.get('Name') or r.get('Bucket') or r.get('name')
+            if bucket_name in matched_buckets:
+                matched.append(r)
+        print("+++++++++++++++++++++++++")
+        print(matched)
+        return matched
 
 class StorageLensMetricsAnalyzer:
     def __init__(self, metrics_info):
