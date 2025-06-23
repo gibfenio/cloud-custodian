@@ -153,7 +153,7 @@ class StorageLensMetricsFilter(Filter):
                 bucket_name = row.get('bucket_name')
                 metric_value = float(row['metric_value']) if not pd.isna(row['metric_value']) else 0.0
                 if bucket_name and operator(metric_value, threshold):
-                    result.append((bucket_name, metric_value))
+                    result.append((bucket_name, int(metric_value)))
             return result
 
         for bucket, key in csv_tuples:
