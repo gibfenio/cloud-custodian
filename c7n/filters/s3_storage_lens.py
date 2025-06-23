@@ -292,36 +292,53 @@ class StorageLensMetricsFilter(Filter):
         }
         operator = operator_map[op]
         matched_buckets = set()
+        detailed_stats = []
         for bucket, key in csv_tuples:
             s3_path = f's3://{bucket}/{key}'
             try:
                 obj = session.client('s3', region_name=region).get_object(Bucket=bucket, Key=key)
                 content = obj['Body'].read().decode('utf-8')
                 df = pd.read_csv(io.StringIO(content))
-                # print(f'==== {s3_path} ====')
-                # print(df)
-                # print('--- Metric Sums (per metric_name) ---')
                 if 'metric_name' in df.columns and 'metric_value' in df.columns:
                     df['metric_value'] = pd.to_numeric(df['metric_value'], errors='coerce').fillna(0)
-                    sums = df.groupby('metric_name')['metric_value'].sum()
-                    for metric, total in sums.items():
-                        # print(f'Metric: {metric} | Sum: {total}')
-                        if metric in metrics and operator(total, threshold):
-                            print(f'[DEBUG] Matched: bucket={bucket}, metric={metric}, sum={total}, threshold={threshold}, op={op}')
-                            matched_buckets.add(bucket)
-                            print(f'[DEBUG] matched_buckets so far: {matched_buckets}')
+                    report_date = df['report_date'].iloc[0] if 'report_date' in df.columns else None
+                    for metric in metrics:
+                        metric_rows = df[df['metric_name'] == metric]
+                        if metric_rows.empty:
+                            continue  # Skip metrics not present in this CSV
+                        metric_sum = float(metric_rows['metric_value'].sum()) if not pd.isna(metric_rows['metric_value'].sum()) else 0.0
+                        if not operator(metric_sum, threshold):
+                            continue  # Only include metrics whose sum exceeded threshold
+                        # Only include buckets with value > 0
+                        buckets = [
+                            {'bucket_name': row['bucket_name'], 'value': float(row['metric_value'])}
+                            for _, row in metric_rows.iterrows()
+                            if 'bucket_name' in row and pd.notnull(row['bucket_name']) and float(row['metric_value']) > 0
+                        ]
+                        comment = f"aggregated sum exceeded threshold {threshold}"
+                        matched_buckets.add(bucket)
+                        detailed_stats.append({
+                            'csv': s3_path,
+                            'report_date': report_date,
+                            'metric_name': metric,
+                            'sum': metric_sum,
+                            'buckets': buckets,
+                            'comment': comment
+                        })
                 else:
-                    print('CSV missing required columns.')
-                print('==============================')
+                    detailed_stats.append({'csv': s3_path, 'error': 'CSV missing required columns.'})
             except Exception as e:
-                print(f'Error reading {s3_path}: {e}')
+                detailed_stats.append({'csv': s3_path, 'error': str(e)})
         matched = []
         for r in resources:
             bucket_name = r.get('Name') or r.get('Bucket') or r.get('name')
             if bucket_name in matched_buckets:
                 matched.append(r)
+            # Attach detailed stats to all resources for traceability
+            r['storage_lens_metric_details'] = detailed_stats
         print("+++++++++++++++++++++++++")
-        print(matched)
+        import json
+        print(json.dumps(matched, indent=2, default=str))
         return matched
 
 class StorageLensMetricsAnalyzer:
