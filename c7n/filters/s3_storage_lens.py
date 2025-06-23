@@ -140,10 +140,14 @@ class StorageLensMetricsFilter(Filter):
     def bucket_metric_exceeds_threshold(metric_rows, operator, threshold, s3_path, report_date, metric, threshold_val):
         details = []
         matched_buckets = set()
+        import pandas as pd
         for _, row in metric_rows.iterrows():
             bucket_name = row.get('bucket_name')
+            # Skip if bucket_name is missing, NaN, not a string, or empty
+            if pd.isna(bucket_name) or not isinstance(bucket_name, str) or not bucket_name.strip():
+                continue
             metric_value = float(row['metric_value']) if not pd.isna(row['metric_value']) else 0.0
-            if bucket_name and operator(metric_value, threshold):
+            if operator(metric_value, threshold):
                 matched_buckets.add(bucket_name)
                 details.append({
                     'csv': s3_path,
@@ -200,15 +204,17 @@ class StorageLensMetricsFilter(Filter):
                         if metric_rows.empty:
                             continue
                         if statistic == 'sum':
-                            exceeded, detail = self.sum_metric_exceeds_threshold(
+                            exceeded, details = self.sum_metric_exceeds_threshold(
                                 metric_rows, operator, threshold, s3_path, report_date, metric, bucket)
-                            if not exceeded:
+                            if not exceeded or details is None:
                                 continue
                             matched_buckets.add(bucket)
-                            detailed_stats.append(detail)
+                            detailed_stats.append(details)
                         elif statistic == 'per-bucket-value':
                             matched_set, details = self.bucket_metric_exceeds_threshold(
                                 metric_rows, operator, threshold, s3_path, report_date, metric, threshold)
+                            if not matched_set or not details:
+                                continue
                             matched_buckets.update(matched_set)
                             detailed_stats.extend(details)
                 else:
