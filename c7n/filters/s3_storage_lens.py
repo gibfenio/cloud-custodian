@@ -1,6 +1,5 @@
 import pandas as pd
 import io
-import json
 from datetime import datetime, timedelta, timezone
 import boto3
 import re
@@ -8,6 +7,7 @@ import botocore
 import botocore.exceptions
 from c7n.filters import Filter
 from c7n.utils import type_schema
+
 
 class StorageLensMetricsFilter(Filter):
     """
@@ -50,9 +50,6 @@ class StorageLensMetricsFilter(Filter):
                 "all_csvs": analyzer.get_all_csvs(),
                 "summary": analyzer.summary()
             }
-            print("All Storage Lens CSVs:")
-            for csv_path in all_csvs:
-                print(csv_path)
 
             csv_tuples = [(path.split('/')[2], '/'.join(path.split('/')[3:])) for path in all_csvs]
             # Instead of combining, check each CSV individually
@@ -127,7 +124,7 @@ class StorageLensMetricsFilter(Filter):
         ]
         comment = f"aggregated sum exceeded threshold {threshold}"
         detail = {
-            'csv': s3_path,
+            's3_len_lens_csv_report': s3_path,
             'report_date': report_date,
             'metric_name': metric,
             'sum': metric_sum,
@@ -140,7 +137,6 @@ class StorageLensMetricsFilter(Filter):
     def bucket_metric_exceeds_threshold(metric_rows, operator, threshold, s3_path, report_date, metric, threshold_val):
         details = []
         matched_buckets = set()
-        import pandas as pd
         for _, row in metric_rows.iterrows():
             bucket_name = row.get('bucket_name')
             # Skip if bucket_name is missing, NaN, not a string, or empty
@@ -150,17 +146,18 @@ class StorageLensMetricsFilter(Filter):
             if operator(metric_value, threshold):
                 matched_buckets.add(bucket_name)
                 details.append({
-                    'csv': s3_path,
+                    's3_len_lens_csv_report': s3_path,
                     'report_date': report_date,
                     'metric_name': metric,
                     'bucket_name': bucket_name,
                     'value': int(metric_value),
-                    'comment': f"bucket value exceeded threshold {threshold_val}"
+                    'comment': f"{bucket_name} metric {metric} value {int(metric_value)} "+
+                               f"exceeded expected threshold {int(threshold_val)}"
                 })
         return matched_buckets, details
 
     @staticmethod
-    def operator_map(operator):
+    def get_operator(operator):
         tmp_operator_map = {
             'greater-than': lambda x, y: x > y,
             'gt': lambda x, y: x > y,
@@ -186,9 +183,10 @@ class StorageLensMetricsFilter(Filter):
         metrics = self.data.get('metrics', [])
         threshold = self.data.get('threshold')
         op = self.data.get('op', 'greater-than')
-        operator = self.operator_map(op)
+        operator = self.get_operator(op)
         matched_buckets = set()
         detailed_stats = []
+        matched = []
 
         for bucket, key in csv_tuples:
             s3_path = f's3://{bucket}/{key}'
@@ -218,17 +216,18 @@ class StorageLensMetricsFilter(Filter):
                             matched_buckets.update(matched_set)
                             detailed_stats.extend(details)
                 else:
-                    detailed_stats.append({'csv': s3_path, 'error': 'CSV missing required columns.'})
+                    detailed_stats.append({'s3_len_lens_csv_report': s3_path, 'error': 'CSV missing required columns.'})
             except Exception as e:
-                detailed_stats.append({'csv': s3_path, 'error': str(e)})
-        matched = []
+                detailed_stats.append({'s3_len_lens_csv_report': s3_path, 'error': str(e)})
+
         for r in resources:
-            bucket_name = r.get('Name') or r.get('Bucket') or r.get('name')
-            if bucket_name in matched_buckets:
-                matched.append(r)
-            # Attach detailed stats to all resources for traceability
-            r['storage_lens_metric_details'] = detailed_stats
+            bucket_name = r.get('Name')
+            bucket_details = [d for d in detailed_stats if d.get('bucket_name') == bucket_name]
+            if bucket_details:
+                matched.append({'storage_lens_metric_details': bucket_details})
+
         return matched
+
 
 class StorageLensMetricsAnalyzer:
     def __init__(self, metrics_info):
