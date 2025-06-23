@@ -1,4 +1,3 @@
-import csv
 import pandas as pd
 import io
 import json
@@ -156,18 +155,9 @@ class StorageLensMetricsFilter(Filter):
                 })
         return matched_buckets, details
 
-    def filter_buckets_by_metrics_per_csv(self, session, csv_tuples, region, resources):
-        """
-        For each CSV, check all metrics in the 'metrics' list.
-        If any metric in the list meets the threshold in a CSV, that bucket is matched.
-        """
-        import pandas as pd
-        statistic = self.data.get('statistic', 'sum')
-
-        metrics = self.data.get('metrics', [])
-        threshold = self.data.get('threshold')
-        op = self.data.get('op', 'greater-than')
-        operator_map = {
+    @staticmethod
+    def operator_map(operator):
+        tmp_operator_map = {
             'greater-than': lambda x, y: x > y,
             'gt': lambda x, y: x > y,
             'greater-than-equal': lambda x, y: x >= y,
@@ -179,7 +169,20 @@ class StorageLensMetricsFilter(Filter):
             'equal': lambda x, y: x == y,
             'eq': lambda x, y: x == y
         }
-        operator = operator_map[op]
+        if operator not in tmp_operator_map:
+            raise ValueError(f"Unsupported operator: {operator}. Supported operators: {list(tmp_operator_map.keys())}")
+        return tmp_operator_map[operator]
+
+    def filter_buckets_by_metrics_per_csv(self, session, csv_tuples, region, resources):
+        """
+        For each CSV, check all metrics in the 'metrics' list.
+        If any metric in the list meets the threshold in a CSV, that bucket is matched.
+        """
+        statistic = self.data.get('statistic', 'sum')
+        metrics = self.data.get('metrics', [])
+        threshold = self.data.get('threshold')
+        op = self.data.get('op', 'greater-than')
+        operator = self.operator_map(op)
         matched_buckets = set()
         detailed_stats = []
 
@@ -219,9 +222,6 @@ class StorageLensMetricsFilter(Filter):
                 matched.append(r)
             # Attach detailed stats to all resources for traceability
             r['storage_lens_metric_details'] = detailed_stats
-        print("+++++++++++++++++++++++++")
-        import json
-        print(json.dumps(matched, indent=2, default=str))
         return matched
 
 class StorageLensMetricsAnalyzer:
