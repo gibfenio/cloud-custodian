@@ -113,27 +113,6 @@ class StorageLensMetricsFilter(Filter):
         return result
 
     @staticmethod
-    def sum_metric_exceeds_threshold(metric_rows, operator, threshold, s3_path, report_date, metric, bucket):
-        metric_sum = float(metric_rows['metric_value'].sum()) if not pd.isna(metric_rows['metric_value'].sum()) else 0.0
-        if not operator(metric_sum, threshold):
-            return False, None
-        buckets = [
-            {'bucket_name': row['bucket_name'], 'value': float(row['metric_value'])}
-            for _, row in metric_rows.iterrows()
-            if 'bucket_name' in row and pd.notnull(row['bucket_name']) and float(row['metric_value']) > 0
-        ]
-        comment = f"aggregated sum exceeded threshold {threshold}"
-        detail = {
-            's3_len_lens_csv_report': s3_path,
-            'report_date': report_date,
-            'metric_name': metric,
-            'sum': metric_sum,
-            'buckets': buckets,
-            'comment': comment
-        }
-        return True, detail
-
-    @staticmethod
     def bucket_metric_exceeds_threshold(metric_rows, operator, threshold, s3_path, report_date, metric, threshold_val):
         details = []
         matched_buckets = set()
@@ -174,6 +153,43 @@ class StorageLensMetricsFilter(Filter):
             raise ValueError(f"Unsupported operator: {operator}. Supported operators: {list(tmp_operator_map.keys())}")
         return tmp_operator_map[operator]
 
+    @staticmethod
+    def group_by_csv_date_descending_then_metric_type_dict(bucket_details):
+        """
+        Groups all bucket metric details by CSV report (descending by date), then by metric name (ascending).
+        Returns a list of dicts, each with csv_file, report_date, and metrics_info (dict of metric_name -> list of bucket dicts).
+        """
+        grouped = {}
+        for detail in bucket_details:
+            csv_report = detail['s3_len_lens_csv_report']
+            report_date = detail['report_date']
+            metric_name = detail['metric_name']
+            if csv_report not in grouped:
+                grouped[csv_report] = {'report_date': report_date, 'metrics': {}}
+            if metric_name not in grouped[csv_report]['metrics']:
+                grouped[csv_report]['metrics'][metric_name] = []
+            grouped[csv_report]['metrics'][metric_name].append({
+                k: v for k, v in detail.items() if k not in ['s3_len_lens_csv_report', 'report_date', 'metric_name']
+            })
+        # Sort by date descending
+        def date_key(item):
+            try:
+                return datetime.strptime(item[1]['report_date'], "%Y-%m-%d")
+            except Exception:
+                return item[1]['report_date']
+        sorted_grouped = sorted(grouped.items(), key=date_key, reverse=True)
+        output = []
+        for csv_report, data in sorted_grouped:
+            # Sort metric names ascending and build a dict
+            metrics_info = {metric_name: data['metrics'][metric_name]
+                            for metric_name in sorted(data['metrics'].keys())}
+            output.append({
+                'csv_file': csv_report,
+                'report_date': data['report_date'],
+                'metrics_info': metrics_info
+            })
+        return output
+
     def filter_buckets_by_metrics_per_csv(self, session, csv_tuples, region, resources):
         """
         For each CSV, check all metrics in the 'metrics' list.
@@ -201,14 +217,7 @@ class StorageLensMetricsFilter(Filter):
                         metric_rows = df[df['metric_name'] == metric]
                         if metric_rows.empty:
                             continue
-                        if statistic == 'sum':
-                            exceeded, details = self.sum_metric_exceeds_threshold(
-                                metric_rows, operator, threshold, s3_path, report_date, metric, bucket)
-                            if not exceeded or details is None:
-                                continue
-                            matched_buckets.add(bucket)
-                            detailed_stats.append(details)
-                        elif statistic == 'per-bucket-value':
+                        if statistic == 'value':
                             matched_set, details = self.bucket_metric_exceeds_threshold(
                                 metric_rows, operator, threshold, s3_path, report_date, metric, threshold)
                             if not matched_set or not details:
@@ -220,12 +229,17 @@ class StorageLensMetricsFilter(Filter):
             except Exception as e:
                 detailed_stats.append({'s3_len_lens_csv_report': s3_path, 'error': str(e)})
 
+        # Instead of grouping per bucket, collect all details across all buckets
+        all_details = []
         for r in resources:
             bucket_name = r.get('Name')
             bucket_details = [d for d in detailed_stats if d.get('bucket_name') == bucket_name]
-            if bucket_details:
-                matched.append({'storage_lens_metric_details': bucket_details})
-
+            all_details.extend(bucket_details)
+        if all_details:
+            output = self.group_by_csv_date_descending_then_metric_type_dict(all_details)
+            matched = [{"s3_lens_metrics_info_list": output}]
+        else:
+            matched = []
         return matched
 
 
