@@ -107,7 +107,8 @@ class StorageLensMetricsFilter(Filter):
         return result
 
     @staticmethod
-    def bucket_metric_exceeds_threshold(metric_rows, operator, threshold, s3_path, report_date, metric, threshold_val):
+    def bucket_metric_exceeds_threshold(metric_rows, operator, operator_str,
+                                        threshold, s3_path, report_date, metric, threshold_val):
         details = []
         matched_buckets = set()
         for _, row in metric_rows.iterrows():
@@ -125,27 +126,27 @@ class StorageLensMetricsFilter(Filter):
                     'bucket_name': bucket_name,
                     'value': int(metric_value),
                     'comment': f"{bucket_name} metric {metric} value {int(metric_value)} "+
-                               f"exceeded expected threshold {int(threshold_val)}"
+                               f"{operator_str} expected threshold {int(threshold_val)}"
                 })
         return matched_buckets, details
 
     @staticmethod
     def get_operator(operator):
-        tmp_operator_map = {
-            'greater-than': lambda x, y: x > y,
-            'gt': lambda x, y: x > y,
-            'greater-than-equal': lambda x, y: x >= y,
-            'ge': lambda x, y: x >= y,
-            'less-than': lambda x, y: x < y,
-            'lt': lambda x, y: x < y,
-            'less-than-equal': lambda x, y: x <= y,
-            'le': lambda x, y: x <= y,
-            'equal': lambda x, y: x == y,
-            'eq': lambda x, y: x == y
+        operator_map = {
+            'greater-than': (lambda x, y: x > y, " > "),
+            'gt': (lambda x, y: x > y, " > "),
+            'greater-than-equal': (lambda x, y: x >= y, " >= "),
+            'ge': (lambda x, y: x >= y, " >= "),
+            'less-than': (lambda x, y: x < y, " < "),
+            'lt': (lambda x, y: x < y, " < "),
+            'less-than-equal': (lambda x, y: x <= y, " <= "),
+            'le': (lambda x, y: x <= y, " <= "),
+            'equal': (lambda x, y: x == y, " == "),
+            'eq': (lambda x, y: x == y, " == ")
         }
-        if operator not in tmp_operator_map:
-            raise ValueError(f"Unsupported operator: {operator}. Supported operators: {list(tmp_operator_map.keys())}")
-        return tmp_operator_map[operator]
+        if operator not in operator_map:
+            raise ValueError(f"Unsupported operator: {operator}. Supported operators: {list(operator_map.keys())}")
+        return operator_map[operator]
 
     @staticmethod
     def group_by_csv_date_then_metric_type(bucket_details):
@@ -193,7 +194,7 @@ class StorageLensMetricsFilter(Filter):
         metrics = self.data.get('metrics', [])
         threshold = self.data.get('threshold')
         op = self.data.get('op', 'greater-than')
-        operator = self.get_operator(op)
+        operator, operator_str = self.get_operator(op)
         matched_buckets = set()
         detailed_stats = []
         matched = []
@@ -213,7 +214,7 @@ class StorageLensMetricsFilter(Filter):
                             continue
                         if statistic == 'value':
                             matched_set, details = self.bucket_metric_exceeds_threshold(
-                                metric_rows, operator, threshold, s3_path, report_date, metric, threshold)
+                                metric_rows, operator, operator_str, threshold, s3_path, report_date, metric, threshold)
                             if not matched_set or not details:
                                 continue
                             matched_buckets.update(matched_set)
