@@ -44,15 +44,9 @@ class StorageLensMetricsFilter(Filter):
                     "csv_list": csv_list
                 })
                 all_csvs.extend([f's3://{bucket}/{key}' for key in csv_list])
-            analyzer = StorageLensMetricsAnalyzer(metrics_info)
-            result = {
-                "metrics_info": metrics_info,
-                "all_csvs": analyzer.get_all_csvs(),
-                "summary": analyzer.summary()
-            }
 
             csv_tuples = [(path.split('/')[2], '/'.join(path.split('/')[3:])) for path in all_csvs]
-            # Instead of combining, check each CSV individually
+            # Check each CSV wise
             return self.filter_buckets_by_metrics_per_csv(session, csv_tuples, region, resources)
         except Exception as e:
             self.log.error(f"Error in getting Storage Lens report files: {e}")
@@ -154,7 +148,7 @@ class StorageLensMetricsFilter(Filter):
         return tmp_operator_map[operator]
 
     @staticmethod
-    def group_by_csv_date_descending_then_metric_type_dict(bucket_details):
+    def group_by_csv_date_then_metric_type(bucket_details):
         """
         Groups all bucket metric details by CSV report (descending by date), then by metric name (ascending).
         Returns a list of dicts, each with csv_file, report_date, and metrics_info (dict of metric_name -> list of bucket dicts).
@@ -236,31 +230,8 @@ class StorageLensMetricsFilter(Filter):
             bucket_details = [d for d in detailed_stats if d.get('bucket_name') == bucket_name]
             all_details.extend(bucket_details)
         if all_details:
-            output = self.group_by_csv_date_descending_then_metric_type_dict(all_details)
+            output = self.group_by_csv_date_then_metric_type(all_details)
             matched = [{"s3_lens_metrics_info_list": output}]
         else:
             matched = []
         return matched
-
-
-class StorageLensMetricsAnalyzer:
-    def __init__(self, metrics_info):
-        self.metrics_info = metrics_info
-
-    def get_all_csvs(self):
-        """Return all CSV file paths across all configs/buckets."""
-        all_csvs = []
-        for entry in self.metrics_info:
-            all_csvs.extend(entry.get('csv_list', []))
-        return all_csvs
-
-    def summary(self):
-        """Return a summary of configs and CSV counts."""
-        return [
-            {
-                'config_name': entry['config_name'],
-                'bucket': entry['buckets'],
-                'csv_count': len(entry.get('csv_list', []))
-            }
-            for entry in self.metrics_info
-        ]
