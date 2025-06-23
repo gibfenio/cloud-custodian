@@ -122,6 +122,8 @@ class StorageLensMetricsFilter(Filter):
         If any metric in the list meets the threshold in a CSV, that bucket is matched.
         """
         import pandas as pd
+        statistic = self.data.get('statistic', 'sum')
+
         metrics = self.data.get('metrics', [])
         threshold = self.data.get('threshold')
         op = self.data.get('op', 'greater-than')
@@ -140,6 +142,20 @@ class StorageLensMetricsFilter(Filter):
         operator = operator_map[op]
         matched_buckets = set()
         detailed_stats = []
+
+        def sum_metric_exceeds_threshold(metric_rows, operator, threshold):
+            metric_sum = float(metric_rows['metric_value'].sum()) if not pd.isna(metric_rows['metric_value'].sum()) else 0.0
+            return operator(metric_sum, threshold), metric_sum
+
+        def bucket_metric_exceeds_threshold(metric_rows, operator, threshold):
+            result = []
+            for _, row in metric_rows.iterrows():
+                bucket_name = row.get('bucket_name')
+                metric_value = float(row['metric_value']) if not pd.isna(row['metric_value']) else 0.0
+                if bucket_name and operator(metric_value, threshold):
+                    result.append((bucket_name, metric_value))
+            return result
+
         for bucket, key in csv_tuples:
             s3_path = f's3://{bucket}/{key}'
             try:
@@ -152,26 +168,38 @@ class StorageLensMetricsFilter(Filter):
                     for metric in metrics:
                         metric_rows = df[df['metric_name'] == metric]
                         if metric_rows.empty:
-                            continue  # Skip metrics not present in this CSV
-                        metric_sum = float(metric_rows['metric_value'].sum()) if not pd.isna(metric_rows['metric_value'].sum()) else 0.0
-                        if not operator(metric_sum, threshold):
-                            continue  # Only include metrics whose sum exceeded threshold
-                        # Only include buckets with value > 0
-                        buckets = [
-                            {'bucket_name': row['bucket_name'], 'value': float(row['metric_value'])}
-                            for _, row in metric_rows.iterrows()
-                            if 'bucket_name' in row and pd.notnull(row['bucket_name']) and float(row['metric_value']) > 0
-                        ]
-                        comment = f"aggregated sum exceeded threshold {threshold}"
-                        matched_buckets.add(bucket)
-                        detailed_stats.append({
-                            'csv': s3_path,
-                            'report_date': report_date,
-                            'metric_name': metric,
-                            'sum': metric_sum,
-                            'buckets': buckets,
-                            'comment': comment
-                        })
+                            continue
+                        if statistic == 'sum':
+                            exceeded, metric_sum = sum_metric_exceeds_threshold(metric_rows, operator, threshold)
+                            if not exceeded:
+                                continue
+                            buckets = [
+                                {'bucket_name': row['bucket_name'], 'value': float(row['metric_value'])}
+                                for _, row in metric_rows.iterrows()
+                                if 'bucket_name' in row and pd.notnull(row['bucket_name']) and float(row['metric_value']) > 0
+                            ]
+                            comment = f"aggregated sum exceeded threshold {threshold}"
+                            matched_buckets.add(bucket)
+                            detailed_stats.append({
+                                'csv': s3_path,
+                                'report_date': report_date,
+                                'metric_name': metric,
+                                'sum': metric_sum,
+                                'buckets': buckets,
+                                'comment': comment
+                            })
+                        elif statistic == 'per-bucket-value':
+                            exceeded_buckets = bucket_metric_exceeds_threshold(metric_rows, operator, threshold)
+                            for bucket_name, metric_value in exceeded_buckets:
+                                matched_buckets.add(bucket_name)
+                                detailed_stats.append({
+                                    'csv': s3_path,
+                                    'report_date': report_date,
+                                    'metric_name': metric,
+                                    'bucket_name': bucket_name,
+                                    'value': metric_value,
+                                    'comment': f"bucket value exceeded threshold {threshold}"
+                                })
                 else:
                     detailed_stats.append({'csv': s3_path, 'error': 'CSV missing required columns.'})
             except Exception as e:
