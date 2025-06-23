@@ -62,28 +62,6 @@ class StorageLensMetricsFilter(Filter):
             self.log.error(f"Error in getting Storage Lens report files: {e}")
         return resources
 
-    def to_df_from_csv(self, session, csv_tuples, region):
-        all_dfs = []
-        print("\nReading CSV contents into DataFrame:")
-        for bucket, key in csv_tuples:
-            s3_path = f's3://{bucket}/{key}'
-            print(f'--- Reading {s3_path} ---')
-            try:
-                obj = session.client('s3', region_name=region).get_object(Bucket=bucket, Key=key)
-                content = obj['Body'].read().decode('utf-8')
-                df = pd.read_csv(io.StringIO(content))
-                df['source_file'] = s3_path  # Add source column
-                all_dfs.append(df)
-            except Exception as e:
-                print(f'Error reading {s3_path}: {e}')
-
-        if all_dfs:
-            combined_df = pd.concat(all_dfs, ignore_index=True)
-        else:
-            combined_df = pd.DataFrame()  # Return empty if no files
-
-        return combined_df
-
     @staticmethod
     def get_all_report_buckets_with_config(account_id, region_name=None):
         """
@@ -118,51 +96,6 @@ class StorageLensMetricsFilter(Filter):
             return []
 
     @staticmethod
-    def get_all_report_buckets(account_id, region_name=None):
-        """
-        Discover S3 buckets configured to receive Storage Lens CSV reports in this account.
-        Returns a list of bucket names.
-        """
-        try:
-            s3control = boto3.client('s3control', region_name=region_name)
-            buckets = set()
-            try:
-                resp = s3control.list_storage_lens_configurations(AccountId=account_id)
-            except botocore.exceptions.ClientError as e:
-                print(f"Error listing Storage Lens configurations: {e}")
-                return []
-            except (botocore.exceptions.NoCredentialsError, botocore.exceptions.PartialCredentialsError) as e:
-                print(f"AWS credentials error: {e}")
-                return []
-
-            for sl_config in resp.get('StorageLensConfigurationList', []):
-                config_id = sl_config['Id']
-                try:
-                    config = s3control.get_storage_lens_configuration(
-                        ConfigId=config_id,
-                        AccountId=account_id
-                    )
-                except botocore.exceptions.ClientError as e:
-                    print(f"Error getting Storage Lens configuration {config_id}: {e}")
-                    continue
-                dest = (config.get('StorageLensConfiguration', {})
-                        .get('DataExport', {})
-                        .get('S3BucketDestination', {}))
-                bucket_arn = dest.get('Arn')
-                if bucket_arn:
-                    # ARN format: arn:aws:s3:::bucket-name
-                    match = re.match(r"arn:aws:s3:::([a-zA-Z0-9._-]+)", bucket_arn)
-                    if match:
-                        buckets.add(match.group(1))
-            return list(buckets)
-        except (botocore.exceptions.NoCredentialsError, botocore.exceptions.PartialCredentialsError) as e:
-            print(f"AWS credentials error: {e}")
-            return []
-        except Exception as e:
-            print(f"Unexpected error in get_all_report_buckets: {e}")
-            return []
-
-    @staticmethod
     def list_recent_report_files(session, buckets, days):
         """
         List all Storage Lens CSV report files in the specified buckets created in the last N days.
@@ -182,92 +115,6 @@ class StorageLensMetricsFilter(Filter):
                         if (now - last_modified).days < days:
                             result[bucket].append(key)
         return result
-
-    def detect_sum_exceeds_threshold(self, metrics_df, metrics, threshold):
-        """
-        For each metric in metrics, computes the sum of metric_value grouped by metric_name.
-        If the sum is >= threshold, returns a list of dicts with metric_name, sum, and csv sources.
-        """
-        print(">>>>>>>>>>>>>>>>>>>>>>>>>")
-        print(metrics)
-        print(">>>>>>>>>>>>>>>>>>>>>>>>>")
-        
-        result = []
-        for metric in metrics:
-            df_metric = metrics_df[metrics_df['metric_name'] == metric]
-            if df_metric.empty:
-                continue
-            total = df_metric['metric_value'].sum()
-            if total >= threshold:
-                csv_metric_values = {
-                    src: int(val)
-                    for src, val in df_metric.groupby('source_file')['metric_value'].sum().items()
-                }
-                result.append({
-                    'metric_name': metric,
-                    'sum': int(total),
-                    'csv_metric_values': csv_metric_values
-                })
-        return result
-
-    def filter_buckets_by_metrics(self, metrics_df, resources):
-        """
-        Filters resources based on aggregated metrics from metrics_df and filter config.
-        Attaches all relevant metrics data as 'metrics_df' to each matching resource.
-        """
-        # DEBUG: print columns
-        print("[DEBUG] metrics_df columns:", metrics_df.columns.tolist())
-        if not metrics_df.empty:
-            print("==== metrics_df (first 2 rows, full columns) ====")
-            print(metrics_df.head(2).to_string(max_cols=None, line_width=1000))
-            print("=================================================")
-        if metrics_df.empty:
-            return []
-
-        # Use correct bucket column name
-        bucket_col = 'bucket_name' if 'bucket_name' in metrics_df.columns else 'Bucket'
-        print(f"[DEBUG] Using bucket column: {bucket_col}")
-
-        metrics = self.data.get('metrics', [])
-        statistic = self.data.get('statistic', 'sum')
-        op = self.data.get('op', 'ge')
-        threshold = self.data.get('threshold', 0)
-
-        # Only keep relevant metrics columns
-        filtered = metrics_df[metrics_df.columns.intersection([bucket_col] + metrics)]
-        grouped = filtered.groupby(bucket_col).agg(statistic)
-
-        import operator as opmap
-        ops = {
-            'ge': opmap.ge,
-            'gt': opmap.gt,
-            'le': opmap.le,
-            'lt': opmap.lt,
-            'eq': opmap.eq,
-            'ne': opmap.ne,
-        }
-        if statistic == 'sum' and op == 'ge':
-            result = self.detect_sum_exceeds_threshold(metrics_df, metrics, threshold)
-            print("=== Metrics sum >= threshold results ===")
-            for entry in result:
-                print(entry)
-            print("========================================")
-
-            # Attach results to resources by bucket name
-            matched = []
-            for r in resources:
-                bucket_name = r.get('Name') or r.get('Bucket') or r.get('name')
-                # Check if this bucket appears in any csv_sources for any metric
-                bucket_metrics = [
-                    entry for entry in result
-                    if any(bucket_name in src for src in entry['csv_metric_values'].keys())
-                ]
-                if bucket_metrics:
-                    r['storage_lens_metrics'] = bucket_metrics
-                    matched.append(r)
-            return matched
-        
-        return []
 
     def filter_buckets_by_metrics_per_csv(self, session, csv_tuples, region, resources):
         """
